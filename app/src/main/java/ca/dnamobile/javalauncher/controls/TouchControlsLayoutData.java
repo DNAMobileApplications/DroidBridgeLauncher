@@ -87,6 +87,7 @@ public final class TouchControlsLayoutData {
                 data.version = Math.max(data.version, 3);
             }
             normalizeSuspiciousImportedSourceCanvas(data);
+            normalizeOutOfBoundsPixelCanvas(data);
             return data;
         }
 
@@ -124,6 +125,7 @@ public final class TouchControlsLayoutData {
                 data.version = Math.max(data.version, 3);
             }
             normalizeSuspiciousImportedSourceCanvas(data);
+            normalizeOutOfBoundsPixelCanvas(data);
             return data;
         }
 
@@ -175,6 +177,7 @@ public final class TouchControlsLayoutData {
         // Use that as the fallback, and grow only when the coordinates prove it must.
         inferPixelSourceCanvasIfNeeded(data, true);
         normalizeSuspiciousImportedSourceCanvas(data);
+        normalizeOutOfBoundsPixelCanvas(data);
         return data;
     }
 
@@ -348,6 +351,58 @@ public final class TouchControlsLayoutData {
         if (maxBottom > 1f && maxBottom <= 540f && data.sourceHeight >= 700f) {
             data.sourceHeight = inferCanvasAxis(maxBottom, DEFAULT_IMPORTED_SOURCE_HEIGHT, true, false);
         }
+    }
+
+
+    private static void normalizeOutOfBoundsPixelCanvas(@NonNull TouchControlsLayoutData data) {
+        if (!data.usesPixelCoordinates() || data.controls.isEmpty()) return;
+
+        float minLeft = Float.MAX_VALUE;
+        float minTop = Float.MAX_VALUE;
+        float maxRight = 0f;
+        float maxBottom = 0f;
+        boolean hasAbsoluteCoordinate = false;
+
+        for (TouchControlData control : data.controls) {
+            if (control.rawX == null) {
+                float width = Math.max(1f, control.width);
+                minLeft = Math.min(minLeft, control.x);
+                maxRight = Math.max(maxRight, control.x + width);
+                hasAbsoluteCoordinate = true;
+            }
+            if (control.rawY == null) {
+                float height = Math.max(1f, control.height);
+                minTop = Math.min(minTop, control.y);
+                maxBottom = Math.max(maxBottom, control.y + height);
+                hasAbsoluteCoordinate = true;
+            }
+        }
+
+        if (!hasAbsoluteCoordinate) return;
+
+        float originalWidth = data.sourceWidth > 0f ? data.sourceWidth : Math.max(DEFAULT_IMPORTED_SOURCE_WIDTH, maxRight);
+        float originalHeight = data.sourceHeight > 0f ? data.sourceHeight : Math.max(DEFAULT_IMPORTED_SOURCE_HEIGHT, maxBottom);
+        float shiftX = minLeft < 0f ? -minLeft : 0f;
+        float shiftY = minTop < 0f ? -minTop : 0f;
+        float normalizedWidth = Math.max(originalWidth + shiftX, maxRight + shiftX);
+        float normalizedHeight = Math.max(originalHeight + shiftY, maxBottom + shiftY);
+
+        boolean needsNormalize = shiftX > 0f
+                || shiftY > 0f
+                || maxRight > originalWidth
+                || maxBottom > originalHeight;
+        if (!needsNormalize) return;
+
+        if (shiftX > 0f || shiftY > 0f) {
+            for (TouchControlData control : data.controls) {
+                if (shiftX > 0f && control.rawX == null) control.x += shiftX;
+                if (shiftY > 0f && control.rawY == null) control.y += shiftY;
+            }
+        }
+
+        data.sourceWidth = Math.max(1f, normalizedWidth);
+        data.sourceHeight = Math.max(1f, normalizedHeight);
+        data.version = Math.max(data.version, 4);
     }
 
     private static void inferPixelSourceCanvasIfNeeded(@NonNull TouchControlsLayoutData data, boolean importedPojavLike) {

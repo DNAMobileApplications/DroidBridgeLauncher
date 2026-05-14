@@ -19,6 +19,8 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Environment;
+import android.provider.DocumentsContract;
+import android.system.Os;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -29,22 +31,20 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.Locale;
 
-/**
- * MobileGlues optional configuration helper.
- *
- * Safer approach than MANAGE_EXTERNAL_STORAGE:
- * - Prefer opening the MobileGlues plugin app for users who want to edit settings there.
- * - Optionally allow the user to pick the MG folder with SAF and persist that tree Uri.
- * - Fall back to /sdcard/MG/config.json when readable.
- */
+import ca.dnamobile.javalauncher.feature.log.Logging;
+
 public final class MobileGluesConfigHelper {
+    private static final String TAG = "MobileGluesConfig";
+
     private static final String CONFIG_DIR_NAME = "MG";
     private static final String CONFIG_FILE_NAME = "config.json";
+    private static final String LOCAL_LAUNCH_DIR_NAME = "MobileGlues";
 
     private static final String PREFS_NAME = "mobile_glues_config";
     private static final String PREF_TREE_URI = "mg_tree_uri";
@@ -58,14 +58,34 @@ public final class MobileGluesConfigHelper {
     private MobileGluesConfigHelper() {
     }
 
+    public static final class SelectionResult {
+        public final boolean success;
+        @NonNull public final String message;
+        @Nullable public final Uri treeUri;
+        @Nullable public final File launchConfigDirectory;
+
+        private SelectionResult(
+                boolean success,
+                @NonNull String message,
+                @Nullable Uri treeUri,
+                @Nullable File launchConfigDirectory
+        ) {
+            this.success = success;
+            this.message = message;
+            this.treeUri = treeUri;
+            this.launchConfigDirectory = launchConfigDirectory;
+        }
+    }
+
     public static boolean isMobileGluesRenderer(@Nullable RendererInterface renderer) {
         if (renderer == null) return false;
         String combined = (safe(renderer.getUniqueIdentifier()) + " "
                 + safe(renderer.getRendererName()) + " "
                 + safe(renderer.getRendererId()) + " "
-                + safe(renderer.getRendererLibrary()))
+                + safe(renderer.getRendererLibrary()) + " "
+                + safe(renderer.getRendererEGL()))
                 .toLowerCase(Locale.ROOT);
-        return combined.contains("mobileglues") || combined.contains("mobile glues");
+        return combined.contains("mobileglues") || combined.contains("mobile glues") || combined.contains("libmobileglues");
     }
 
     @NonNull
@@ -78,12 +98,26 @@ public final class MobileGluesConfigHelper {
         return new File(getConfigDirectory(), CONFIG_FILE_NAME);
     }
 
-    public static boolean hasStorageAccess(@NonNull Context context) {
-        return canReadConfigFile() || hasSelectedConfigTree(context);
+    @NonNull
+    public static File getLaunchConfigDirectory(@NonNull Context context) {
+        return new File(context.getApplicationContext().getFilesDir(), LOCAL_LAUNCH_DIR_NAME);
     }
 
-    public static boolean shouldShowStorageAccessPrompt(@NonNull Context context,
-                                                        @Nullable RendererInterface renderer) {
+    @NonNull
+    public static File getLaunchConfigFile(@NonNull Context context) {
+        return new File(getLaunchConfigDirectory(context), CONFIG_FILE_NAME);
+    }
+
+    public static boolean hasStorageAccess(@NonNull Context context) {
+        return canReadConfigFile()
+                || findSafConfigFile(context) != null
+                || getLaunchConfigFile(context).isFile();
+    }
+
+    public static boolean shouldShowStorageAccessPrompt(
+            @NonNull Context context,
+            @Nullable RendererInterface renderer
+    ) {
         return isMobileGluesRenderer(renderer) && !hasStorageAccess(context);
     }
 
@@ -96,15 +130,53 @@ public final class MobileGluesConfigHelper {
         return getSelectedConfigTreeUri(context) != null;
     }
 
-    public static void setSelectedConfigTreeUri(@NonNull Context context, @Nullable Uri treeUri) {
-        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        prefs.edit().putString(PREF_TREE_URI, treeUri != null ? treeUri.toString() : null).apply();
+    @NonNull
+    public static SelectionResult setSelectedConfigTreeUri(@NonNull Context context, @Nullable Uri treeUri) {
+        Context appContext = context.getApplicationContext();
+        if (treeUri == null) {
+            getPrefs(appContext).edit().remove(PREF_TREE_URI).apply();
+            return new SelectionResult(false, "MobileGlues folder selection cleared.", null, null);
+        }
+
+        DocumentFile picked = documentFromTreeUri(appContext, treeUri);
+        if (picked == null || !picked.exists() || !picked.isDirectory()) {
+            return new SelectionResult(false, "That folder could not be opened. Choose the MG folder again.", treeUri, null);
+        }
+
+        DocumentFile config = findConfigFileInTree(appContext, treeUri);
+        if (config == null) {
+            return new SelectionResult(
+                    false,
+                    "No config.json was found. Choose the MG folder at the root of internal storage: /storage/emulated/0/MG.",
+                    treeUri,
+                    null
+            );
+        }
+
+        getPrefs(appContext).edit().putString(PREF_TREE_URI, treeUri.toString()).apply();
+
+        try {
+            File launchDir = prepareLaunchConfig(appContext);
+            return new SelectionResult(
+                    true,
+                    "MobileGlues MG folder saved. Launches will use: " + launchDir.getAbsolutePath(),
+                    treeUri,
+                    launchDir
+            );
+        } catch (Throwable throwable) {
+            Logging.e(TAG, "Unable to mirror selected MobileGlues config", throwable);
+            return new SelectionResult(
+                    false,
+                    "MG folder was saved, but config.json could not be mirrored: " + safeMessage(throwable),
+                    treeUri,
+                    null
+            );
+        }
     }
 
     @Nullable
     public static Uri getSelectedConfigTreeUri(@NonNull Context context) {
-        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String value = prefs.getString(PREF_TREE_URI, null);
+        String value = getPrefs(context).getString(PREF_TREE_URI, null);
         if (value == null || value.trim().isEmpty()) return null;
         try {
             return Uri.parse(value);
@@ -116,29 +188,51 @@ public final class MobileGluesConfigHelper {
     @Nullable
     public static DocumentFile getSelectedConfigTree(@NonNull Context context) {
         Uri treeUri = getSelectedConfigTreeUri(context);
-        if (treeUri == null) return null;
-        try {
-            return DocumentFile.fromTreeUri(context, treeUri);
-        } catch (Throwable ignored) {
-            return null;
-        }
+        return treeUri != null ? documentFromTreeUri(context, treeUri) : null;
     }
 
-    @Nullable
-    private static DocumentFile findSafConfigFile(@NonNull Context context) {
-        DocumentFile root = getSelectedConfigTree(context);
-        if (root == null || !root.exists()) return null;
-
-        DocumentFile direct = root.findFile(CONFIG_FILE_NAME);
-        if (direct != null && direct.isFile()) return direct;
-
-        DocumentFile mgDir = root.findFile(CONFIG_DIR_NAME);
-        if (mgDir != null && mgDir.isDirectory()) {
-            DocumentFile nested = mgDir.findFile(CONFIG_FILE_NAME);
-            if (nested != null && nested.isFile()) return nested;
+    @NonNull
+    public static File prepareLaunchConfig(@NonNull Context context) throws Exception {
+        Context appContext = context.getApplicationContext();
+        File launchDir = getLaunchConfigDirectory(appContext);
+        if (!launchDir.exists() && !launchDir.mkdirs() && !launchDir.isDirectory()) {
+            throw new IllegalStateException("Unable to create MobileGlues launch config folder: " + launchDir.getAbsolutePath());
         }
 
-        return null;
+        String jsonText = readBestConfigJson(appContext);
+        if (jsonText != null) {
+            writeFile(getLaunchConfigFile(appContext), jsonText);
+        }
+
+        return launchDir;
+    }
+
+    @NonNull
+    public static File applyLaunchEnvironment(@NonNull Context context) throws Exception {
+        File launchDir = prepareLaunchConfig(context);
+        applyLaunchEnvironment(context, launchDir);
+        return launchDir;
+    }
+
+    public static void applyLaunchEnvironment(@NonNull Context context, @NonNull File launchDir) throws Exception {
+        if (!launchDir.exists() && !launchDir.mkdirs() && !launchDir.isDirectory()) {
+            throw new IllegalStateException("Unable to create MobileGlues launch config folder: " + launchDir.getAbsolutePath());
+        }
+        Os.setenv("MG_DIR_PATH", launchDir.getAbsolutePath(), true);
+        Logging.i(TAG, "Applied MobileGlues MG_DIR_PATH=" + launchDir.getAbsolutePath()
+                + " configExists=" + new File(launchDir, CONFIG_FILE_NAME).isFile());
+    }
+
+    public static void addMgPickerHints(@NonNull Intent intent) {
+        intent.putExtra("android.content.extra.SHOW_ADVANCED", true);
+        try {
+            Uri initialUri = DocumentsContract.buildTreeDocumentUri(
+                    "com.android.externalstorage.documents",
+                    "primary:" + CONFIG_DIR_NAME
+            );
+            intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri);
+        } catch (Throwable ignored) {
+        }
     }
 
     @NonNull
@@ -175,43 +269,46 @@ public final class MobileGluesConfigHelper {
             return "No external MobileGlues configuration is used by this renderer.";
         }
 
-        File configFile = getConfigFile();
-        String sourceLabel = "Direct path: " + configFile.getAbsolutePath();
+        Context appContext = context.getApplicationContext();
+        String sourceLabel = "";
         String jsonText = null;
 
-        if (canReadConfigFile()) {
-            try {
-                jsonText = readFile(configFile);
-            } catch (Throwable throwable) {
-                return "MobileGlues config path: " + configFile.getAbsolutePath()
-                        + "\nThe config exists, but JavaLauncher could not parse it: " + throwable.getMessage();
-            }
-        } else {
-            DocumentFile safFile = findSafConfigFile(context);
+        try {
+            DocumentFile safFile = findSafConfigFile(appContext);
             if (safFile != null) {
-                try {
-                    jsonText = readDocumentFile(context, safFile);
-                    sourceLabel = "Selected SAF config: " + safe(safFile.getUri() != null ? safFile.getUri().toString() : "");
-                } catch (Throwable throwable) {
-                    return sourceLabel
-                            + "\nThe SAF config exists, but JavaLauncher could not parse it: " + throwable.getMessage();
-                }
+                jsonText = readDocumentFile(appContext, safFile);
+                sourceLabel = "Selected MG folder config: " + safe(safFile.getUri() != null ? safFile.getUri().toString() : "");
+            } else if (canReadConfigFile()) {
+                jsonText = readFile(getConfigFile());
+                sourceLabel = "Direct config: " + getConfigFile().getAbsolutePath();
+            } else if (getLaunchConfigFile(appContext).isFile()) {
+                jsonText = readFile(getLaunchConfigFile(appContext));
+                sourceLabel = "Mirrored launch config: " + getLaunchConfigFile(appContext).getAbsolutePath();
             }
+        } catch (Throwable throwable) {
+            return "MobileGlues config could not be read: " + safeMessage(throwable)
+                    + "\nExpected MG folder: " + getConfigDirectory().getAbsolutePath()
+                    + "\nLaunch MG_DIR_PATH: " + getLaunchConfigDirectory(appContext).getAbsolutePath();
         }
 
         if (jsonText == null) {
-            return "MobileGlues config path: " + configFile.getAbsolutePath()
-                    + "\nSelected SAF folder: " + safe(getSelectedConfigTreeUri(context) != null ? getSelectedConfigTreeUri(context).toString() : "None")
-                    + "\nJavaLauncher cannot currently read a MobileGlues config from either location."
-                    + "\nUse Open MobileGlues App or Choose MobileGlues Folder to test settings parity.";
+            return "MobileGlues config not found."
+                    + "\nChoose the MG folder at: " + getConfigDirectory().getAbsolutePath()
+                    + "\nSelected SAF folder: " + safe(getSelectedConfigTreeUri(appContext) != null ? getSelectedConfigTreeUri(appContext).toString() : "None")
+                    + "\nLaunch MG_DIR_PATH: " + getLaunchConfigDirectory(appContext).getAbsolutePath();
         }
 
         try {
+            File launchDir = getLaunchConfigDirectory(appContext);
             JSONObject json = new JSONObject(jsonText);
             StringBuilder out = new StringBuilder();
             out.append(sourceLabel).append('\n');
+            out.append("Launch MG_DIR_PATH: ").append(launchDir.getAbsolutePath()).append('\n');
             appendKnown(out, json, "enableANGLE", "ANGLE");
+            appendKnown(out, json, "enableAngle", "ANGLE");
             appendKnown(out, json, "enableNoError", "Ignore GL errors");
+            appendKnown(out, json, "ignoreError", "Ignore GL errors");
+            appendKnown(out, json, "enableExtGL43", "OpenGL 4.3 extension set");
             appendKnown(out, json, "enableExtComputeShader", "ARB_compute_shader");
             appendKnown(out, json, "enableExtTimerQuery", "timer_query");
             appendKnown(out, json, "enableExtDirectStateAccess", "direct_state_access");
@@ -237,21 +334,67 @@ public final class MobileGluesConfigHelper {
             return out.toString().trim();
         } catch (Throwable throwable) {
             return sourceLabel
-                    + "\nThe config exists, but JavaLauncher could not parse it: " + throwable.getMessage();
+                    + "\nThe config exists, but DroidBridge could not parse it: " + safeMessage(throwable)
+                    + "\nLaunch MG_DIR_PATH: " + getLaunchConfigDirectory(appContext).getAbsolutePath();
         }
     }
 
-    private static void appendKnown(@NonNull StringBuilder out,
-                                    @NonNull JSONObject json,
-                                    @NonNull String key,
-                                    @NonNull String label) {
+    @Nullable
+    private static String readBestConfigJson(@NonNull Context context) throws Exception {
+        DocumentFile safFile = findSafConfigFile(context);
+        if (safFile != null) return readDocumentFile(context, safFile);
+        if (canReadConfigFile()) return readFile(getConfigFile());
+        File mirrored = getLaunchConfigFile(context);
+        return mirrored.isFile() ? readFile(mirrored) : null;
+    }
+
+    @Nullable
+    private static DocumentFile findSafConfigFile(@NonNull Context context) {
+        Uri treeUri = getSelectedConfigTreeUri(context);
+        return treeUri != null ? findConfigFileInTree(context, treeUri) : null;
+    }
+
+    @Nullable
+    private static DocumentFile findConfigFileInTree(@NonNull Context context, @NonNull Uri treeUri) {
+        DocumentFile root = documentFromTreeUri(context, treeUri);
+        if (root == null || !root.exists() || !root.isDirectory()) return null;
+
+        DocumentFile direct = root.findFile(CONFIG_FILE_NAME);
+        if (direct != null && direct.isFile()) return direct;
+
+        DocumentFile mgDir = root.findFile(CONFIG_DIR_NAME);
+        if (mgDir != null && mgDir.isDirectory()) {
+            DocumentFile nested = mgDir.findFile(CONFIG_FILE_NAME);
+            if (nested != null && nested.isFile()) return nested;
+        }
+
+        return null;
+    }
+
+    @Nullable
+    private static DocumentFile documentFromTreeUri(@NonNull Context context, @NonNull Uri treeUri) {
+        try {
+            return DocumentFile.fromTreeUri(context.getApplicationContext(), treeUri);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static void appendKnown(
+            @NonNull StringBuilder out,
+            @NonNull JSONObject json,
+            @NonNull String key,
+            @NonNull String label
+    ) {
         if (!json.has(key)) return;
         out.append("• ").append(label).append(" = ").append(json.opt(key)).append('\n');
     }
 
     private static boolean isKnownKey(@NonNull String key) {
         return "enableANGLE".equals(key)
+                || "enableAngle".equals(key)
                 || "enableNoError".equals(key)
+                || "ignoreError".equals(key)
                 || "enableExtGL43".equals(key)
                 || "enableExtComputeShader".equals(key)
                 || "enableExtTimerQuery".equals(key)
@@ -267,15 +410,14 @@ public final class MobileGluesConfigHelper {
 
     @NonNull
     private static String readFile(@NonNull File file) throws Exception {
-        try (FileInputStream input = new FileInputStream(file)) {
-            byte[] buffer = new byte[(int) file.length()];
-            int offset = 0;
-            while (offset < buffer.length) {
-                int read = input.read(buffer, offset, buffer.length - offset);
-                if (read < 0) break;
-                offset += read;
+        try (FileInputStream input = new FileInputStream(file);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
             }
-            return new String(buffer, 0, offset, StandardCharsets.UTF_8);
+            return output.toString(StandardCharsets.UTF_8.name());
         }
     }
 
@@ -294,8 +436,29 @@ public final class MobileGluesConfigHelper {
         }
     }
 
+    private static void writeFile(@NonNull File file, @NonNull String text) throws Exception {
+        File parent = file.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs() && !parent.isDirectory()) {
+            throw new IllegalStateException("Unable to create directory: " + parent.getAbsolutePath());
+        }
+        try (FileOutputStream output = new FileOutputStream(file, false)) {
+            output.write(text.getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    @NonNull
+    private static SharedPreferences getPrefs(@NonNull Context context) {
+        return context.getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+    }
+
     @NonNull
     private static String safe(@Nullable String value) {
         return value == null ? "" : value;
+    }
+
+    @NonNull
+    private static String safeMessage(@NonNull Throwable throwable) {
+        String message = throwable.getMessage();
+        return message == null || message.trim().isEmpty() ? throwable.toString() : message;
     }
 }

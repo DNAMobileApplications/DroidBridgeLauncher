@@ -32,6 +32,7 @@ import ca.dnamobile.javalauncher.feature.unpack.Jre;
 import ca.dnamobile.javalauncher.feature.unpack.UnpackComponentsTask;
 import ca.dnamobile.javalauncher.feature.unpack.UnpackJreTask;
 import ca.dnamobile.javalauncher.feature.unpack.UnpackSingleFilesTask;
+import ca.dnamobile.javalauncher.launcher.JavaLaunch;
 import ca.dnamobile.javalauncher.utils.path.PathManager;
 
 @SuppressLint("CustomSplashScreen")
@@ -126,7 +127,7 @@ public class SplashActivity extends AppCompatActivity {
         runOnUiThread(() -> {
             if (finished) return;
             setStatus(getString(R.string.splash_screen_done));
-            startActivity(new Intent(this, MainActivity.class));
+            startActivity(new Intent(this, JavaLaunch.class));
             finish();
         });
     }

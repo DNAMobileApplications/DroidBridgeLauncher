@@ -48,6 +48,7 @@ final class TouchControlButtonView extends TextView {
         void onEditRequested(@NonNull TouchControlButtonView view, @NonNull TouchControlData data);
         void onMenuRequested();
         void onToggleControlsRequested();
+        void onKeySenderKeyboardRequested();
     }
 
     private static final String TAG = "TouchButton";
@@ -107,7 +108,7 @@ final class TouchControlButtonView extends TextView {
         setAllCaps(false);
         setText(data.label);
         setBackground(makeBackground(false));
-        setAlpha(Math.max(0.15f, Math.min(1f, data.opacity)) * ControlsPreferences.getGlobalOpacity(context));
+        setAlpha(resolvedDisplayAlpha());
         setLongClickable(true);
         setWillNotDraw(false);
         setupJoystickPaints();
@@ -122,13 +123,20 @@ final class TouchControlButtonView extends TextView {
     void refreshVisualState() {
         setText(data.label);
         setBackground(makeBackground(editMode));
-        setAlpha(Math.max(0.15f, Math.min(1f, data.opacity)) * ControlsPreferences.getGlobalOpacity(getContext()));
+        setAlpha(resolvedDisplayAlpha());
         invalidate();
     }
 
     @NonNull
     TouchControlData getData() {
         return data;
+    }
+
+    private float resolvedDisplayAlpha() {
+        float localOpacity = Math.max(0f, Math.min(1f, data.opacity));
+        float globalOpacity = Math.max(0f, Math.min(1f, ControlsPreferences.getGlobalOpacity(getContext())));
+        float alpha = localOpacity * globalOpacity;
+        return editMode ? Math.max(0.25f, alpha) : alpha;
     }
 
     private void setupJoystickPaints() {
@@ -288,6 +296,11 @@ final class TouchControlButtonView extends TextView {
                     performClick();
                     return true;
                 }
+                if (TouchControlActions.KEY_SENDER_KEYBOARD.equals(data.action)) {
+                    listener.onKeySenderKeyboardRequested();
+                    performClick();
+                    return true;
+                }
                 if (data.toggle) {
                     pressedState = !pressedState;
                     send(pressedState);
@@ -406,6 +419,10 @@ final class TouchControlButtonView extends TextView {
             }
             if (TouchControlActions.KEYBOARD.equals(data.action)) {
                 if (down) TouchKeyboardHelper.showKeyboard(this);
+                return;
+            }
+            if (TouchControlActions.KEY_SENDER_KEYBOARD.equals(data.action)) {
+                if (down) listener.onKeySenderKeyboardRequested();
             }
         } catch (Throwable throwable) {
             Logging.e(TAG, "Unable to send touch control input", throwable);
@@ -433,6 +450,9 @@ final class TouchControlButtonView extends TextView {
                 return;
             case TouchControlData.SPECIAL_KEYBOARD:
                 if (down) TouchKeyboardHelper.showKeyboard(this);
+                return;
+            case TouchControlData.SPECIAL_KEY_SENDER_KEYBOARD:
+                if (down) listener.onKeySenderKeyboardRequested();
                 return;
             case TouchControlData.SPECIAL_MENU:
                 if (down) listener.onMenuRequested();

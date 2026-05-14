@@ -26,6 +26,14 @@ public final class FFmpegPluginCompat {
 
     public static final String JAVALAUNCHER_PACKAGE = "ca.dnamobile.javalauncher.ffmpeg";
 
+    private static final String[] KNOWN_PACKAGES = new String[] {
+            JAVALAUNCHER_PACKAGE,
+            "ca.dnamobile.javalauncher.ffmpeg.debug",
+            "ca.dnamobile.javalauncher.debug.ffmpeg",
+            "ca.dnamobile.droidbridge.ffmpeg",
+            "ca.dnamobile.droidbridge.ffmpeg.debug"
+    };
+
     private FFmpegPluginCompat() {
     }
 
@@ -36,6 +44,7 @@ public final class FFmpegPluginCompat {
             return new Result(
                     false,
                     false,
+                    null,
                     null,
                     null,
                     null,
@@ -50,17 +59,25 @@ public final class FFmpegPluginCompat {
                 result.packageName,
                 result.libraryPath,
                 result.executablePath,
+                result.ffprobePath,
                 result.errorMessage
         );
     }
 
     @NonNull
     public static Result discoverInstalled(@NonNull Context context) {
-        Result result = discoverPackage(context, JAVALAUNCHER_PACKAGE);
-        if (result.available) return result;
+        StringBuilder errors = new StringBuilder();
+        for (String packageName : KNOWN_PACKAGES) {
+            Result result = discoverPackage(context, packageName);
+            if (result.available) return result;
+            if (result.errorMessage != null && result.errorMessage.length() > 0) {
+                if (errors.length() > 0) errors.append(" | ");
+                errors.append(packageName).append(": ").append(result.errorMessage);
+            }
+        }
 
-        return Result.missing(result.errorMessage != null
-                ? result.errorMessage
+        return Result.missing(errors.length() > 0
+                ? errors.toString()
                 : "JavaLauncher FFmpeg plugin is not installed");
     }
 
@@ -81,30 +98,42 @@ public final class FFmpegPluginCompat {
 
             ApplicationInfo applicationInfo = info.applicationInfo;
             if (applicationInfo == null || applicationInfo.nativeLibraryDir == null) {
-                return Result.missing("FFmpeg plugin has no nativeLibraryDir: " + packageName);
+                return Result.missing("FFmpeg plugin has no nativeLibraryDir");
             }
 
             File libraryDir = new File(applicationInfo.nativeLibraryDir);
-            File executable = new File(libraryDir, "libffmpeg.so");
-            if (!executable.isFile()) {
-                return Result.missing("FFmpeg executable missing: " + executable.getAbsolutePath());
+            File ffmpeg = new File(libraryDir, "libffmpeg.so");
+            File ffprobe = new File(libraryDir, "libffprobe.so");
+
+            if (!ffmpeg.isFile()) {
+                return Result.missing("FFmpeg executable missing: " + ffmpeg.getAbsolutePath());
             }
 
-            // Best effort only. Android normally extracts native libs executable already.
+            // Do not copy libffmpeg.so into DroidBridge's private files dir.
+            // Android 10+ blocks exec() from writable app-private directories,
+            // which returns EACCES even when File#setExecutable(true) succeeds.
+            // The native exec hook runs this trusted APK native-library path through
+            // /system/bin/linker64 instead.
             //noinspection ResultOfMethodCallIgnored
-            executable.setExecutable(true, false);
+            ffmpeg.setReadable(true, false);
+            //noinspection ResultOfMethodCallIgnored
+            ffprobe.setReadable(true, false);
+
+            String ffprobePath = ffprobe.isFile() ? ffprobe.getAbsolutePath() : null;
 
             Logging.i(TAG, "Discovered JavaLauncher FFmpeg plugin"
                     + " package=" + packageName
                     + " libraryPath=" + libraryDir.getAbsolutePath()
-                    + " executable=" + executable.getAbsolutePath());
+                    + " ffmpeg=" + ffmpeg.getAbsolutePath()
+                    + " ffprobe=" + (ffprobePath != null ? ffprobePath : "<missing>"));
 
             return new Result(
                     true,
                     false,
                     packageName,
                     libraryDir.getAbsolutePath(),
-                    executable.getAbsolutePath(),
+                    ffmpeg.getAbsolutePath(),
+                    ffprobePath,
                     null
             );
         } catch (Throwable throwable) {
@@ -139,6 +168,7 @@ public final class FFmpegPluginCompat {
         @Nullable public final String packageName;
         @Nullable public final String libraryPath;
         @Nullable public final String executablePath;
+        @Nullable public final String ffprobePath;
         @Nullable public final String errorMessage;
 
         private Result(
@@ -147,6 +177,7 @@ public final class FFmpegPluginCompat {
                 @Nullable String packageName,
                 @Nullable String libraryPath,
                 @Nullable String executablePath,
+                @Nullable String ffprobePath,
                 @Nullable String errorMessage
         ) {
             this.available = available;
@@ -154,12 +185,13 @@ public final class FFmpegPluginCompat {
             this.packageName = packageName;
             this.libraryPath = libraryPath;
             this.executablePath = executablePath;
+            this.ffprobePath = ffprobePath;
             this.errorMessage = errorMessage;
         }
 
         @NonNull
         static Result missing(@Nullable String errorMessage) {
-            return new Result(false, false, null, null, null, errorMessage);
+            return new Result(false, false, null, null, null, null, errorMessage);
         }
     }
 }

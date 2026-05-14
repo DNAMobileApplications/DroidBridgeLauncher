@@ -34,6 +34,11 @@ final class TouchInputBinding {
             new Option("Mouse middle click / Pick block", TouchControlData.SPECIAL_MOUSE_MIDDLE),
             new Option("Mouse wheel up", TouchControlData.SPECIAL_SCROLL_UP),
             new Option("Mouse wheel down", TouchControlData.SPECIAL_SCROLL_DOWN),
+            new Option("Open Android keyboard", TouchControlData.SPECIAL_KEYBOARD),
+            new Option("Open key sender keyboard", TouchControlData.SPECIAL_KEY_SENDER_KEYBOARD),
+            new Option("Open launcher menu", TouchControlData.SPECIAL_MENU),
+            new Option("Show / hide touch controls", TouchControlData.SPECIAL_TOGGLE_CONTROLS),
+            new Option("Toggle virtual cursor", TouchControlData.SPECIAL_VIRTUAL_MOUSE),
 
             new Option("W / Forward", 87),
             new Option("A / Left", 65),
@@ -151,7 +156,8 @@ final class TouchInputBinding {
                 "Single scroll wheel",
                 "Open launcher menu",
                 "Show / hide touch controls",
-                "Open keyboard",
+                "Open Android keyboard",
+                "Open key sender keyboard",
                 "Joystick / WASD",
                 "Toggle virtual cursor"
         };
@@ -166,6 +172,7 @@ final class TouchInputBinding {
                 TouchControlActions.MENU,
                 TouchControlActions.TOGGLE_CONTROLS,
                 TouchControlActions.KEYBOARD,
+                TouchControlActions.KEY_SENDER_KEYBOARD,
                 TouchControlActions.JOYSTICK,
                 TouchControlActions.VIRTUAL_MOUSE
         };
@@ -185,6 +192,7 @@ final class TouchInputBinding {
         if (TouchControlActions.SCROLL.equals(action)) return SCROLL_OPTIONS;
         if (TouchControlActions.KEY.equals(action)) return KEY_OPTIONS;
         if (TouchControlActions.JOYSTICK.equals(action)) return EMPTY_OPTIONS;
+        if (TouchControlActions.KEY_SENDER_KEYBOARD.equals(action)) return EMPTY_OPTIONS;
         if (TouchControlActions.VIRTUAL_MOUSE.equals(action)) return EMPTY_OPTIONS;
         return EMPTY_OPTIONS;
     }
@@ -296,7 +304,8 @@ final class TouchInputBinding {
             case TouchControlData.SPECIAL_MOUSE_MIDDLE: return "Mouse middle click / Pick block";
             case TouchControlData.SPECIAL_SCROLL_UP: return "Mouse wheel up";
             case TouchControlData.SPECIAL_SCROLL_DOWN: return "Mouse wheel down";
-            case TouchControlData.SPECIAL_KEYBOARD: return "Open keyboard";
+            case TouchControlData.SPECIAL_KEYBOARD: return "Open Android keyboard";
+            case TouchControlData.SPECIAL_KEY_SENDER_KEYBOARD: return "Open key sender keyboard";
             case TouchControlData.SPECIAL_MENU: return "Open launcher menu";
             case TouchControlData.SPECIAL_TOGGLE_CONTROLS: return "Show / hide touch controls";
             case TouchControlData.SPECIAL_VIRTUAL_MOUSE: return "Toggle virtual cursor";

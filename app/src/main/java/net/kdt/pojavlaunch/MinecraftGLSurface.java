@@ -22,6 +22,7 @@ import android.graphics.SurfaceTexture;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.util.AttributeSet;
 import android.view.InputDevice;
 import android.view.KeyCharacterMap;
@@ -66,6 +67,14 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
     private int renderHeight = 1;
     private float inputScaleX = 1.0f;
     private float inputScaleY = 1.0f;
+
+    private int lastSentWindowWidth = -1;
+    private int lastSentWindowHeight = -1;
+    private int lastLoggedScalePercent = -1;
+    private int lastLoggedViewWidth = -1;
+    private int lastLoggedViewHeight = -1;
+    private int lastLoggedRenderWidth = -1;
+    private int lastLoggedRenderHeight = -1;
 
     private SurfaceReadyListener surfaceReadyListener;
     private OnRenderingStartedListener renderingStartedListener;
@@ -183,6 +192,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
             public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture surface) {
                 bridgeWindowAttached = false;
                 JREUtils.releaseBridgeWindow();
+                resetSentWindowSize();
                 releaseTextureSurface();
                 return true;
             }
@@ -232,7 +242,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                     bridgeWindowAttached = true;
 
                     updateSizeFields(size);
-                    CallbackBridge.sendUpdateWindowSize(size.renderWidth, size.renderHeight);
+                    sendWindowSizeIfChanged(size, "surfaceChanged");
                     CallbackBridge.sendCursorPos(CallbackBridge.mouseX, CallbackBridge.mouseY);
 
                     scheduleSurfaceResizeRefreshes();
@@ -293,7 +303,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         }
 
         if (bridgeWindowAttached) {
-            CallbackBridge.sendUpdateWindowSize(size.renderWidth, size.renderHeight);
+            sendWindowSizeIfChanged(size, "refreshSize");
         }
     }
 
@@ -317,7 +327,8 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         updateSizeFields(size);
         CallbackBridge.mouseX = size.renderWidth / 2f;
         CallbackBridge.mouseY = size.renderHeight / 2f;
-        CallbackBridge.sendUpdateWindowSize(size.renderWidth, size.renderHeight);
+        resetSentWindowSize();
+        sendWindowSizeIfChanged(size, "attachBridgeWindow");
         CallbackBridge.sendCursorPos(CallbackBridge.mouseX, CallbackBridge.mouseY);
         scheduleSurfaceResizeRefreshes();
     }
@@ -326,9 +337,10 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
     private RenderSize updateScaledSizeFromView(int width, int height) {
         int safeViewWidth = safeWidth(width);
         int safeViewHeight = safeHeight(height);
-        int percent = LauncherPreferences.getGameResolutionScalePercent(getContext());
+        int percent = clampResolutionScalePercent(LauncherPreferences.getGameResolutionScalePercent(getContext()));
         int safeRenderWidth = Math.max(1, Math.round(safeViewWidth * (percent / 100.0f)));
         int safeRenderHeight = Math.max(1, Math.round(safeViewHeight * (percent / 100.0f)));
+        logResolutionScaleIfChanged(safeViewWidth, safeViewHeight, percent, safeRenderWidth, safeRenderHeight);
 
         viewWidth = safeViewWidth;
         viewHeight = safeViewHeight;
@@ -340,6 +352,56 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         RenderSize size = new RenderSize(viewWidth, viewHeight, renderWidth, renderHeight);
         updateSizeFields(size);
         return size;
+    }
+
+    private int clampResolutionScalePercent(int percent) {
+        if (percent < 1) return 1;
+        if (percent > 100) return 100;
+        return percent;
+    }
+
+    private void logResolutionScaleIfChanged(int safeViewWidth, int safeViewHeight, int percent, int safeRenderWidth, int safeRenderHeight) {
+        if (lastLoggedScalePercent == percent
+                && lastLoggedViewWidth == safeViewWidth
+                && lastLoggedViewHeight == safeViewHeight
+                && lastLoggedRenderWidth == safeRenderWidth
+                && lastLoggedRenderHeight == safeRenderHeight) {
+            return;
+        }
+
+        lastLoggedScalePercent = percent;
+        lastLoggedViewWidth = safeViewWidth;
+        lastLoggedViewHeight = safeViewHeight;
+        lastLoggedRenderWidth = safeRenderWidth;
+        lastLoggedRenderHeight = safeRenderHeight;
+
+        Log.i("ResolutionScale", "view=" + safeViewWidth + "x" + safeViewHeight
+                + " percent=" + percent
+                + " render=" + safeRenderWidth + "x" + safeRenderHeight
+                + " texture=" + (textureView != null)
+                + " nativeSurface=" + (nativeSurfaceView != null));
+    }
+
+    private void sendWindowSizeIfChanged( RenderSize size,  String reason) {
+        int width = Math.max(1, size.renderWidth);
+        int height = Math.max(1, size.renderHeight);
+        if (width == lastSentWindowWidth && height == lastSentWindowHeight) {
+            return;
+        }
+
+        lastSentWindowWidth = width;
+        lastSentWindowHeight = height;
+
+        Log.i("ResolutionScale", "sendWindowSize reason=" + reason
+                + " view=" + size.viewWidth + "x" + size.viewHeight
+                + " render=" + width + "x" + height
+                + " scale=" + clampResolutionScalePercent(LauncherPreferences.getGameResolutionScalePercent(getContext())) + "%");
+        CallbackBridge.sendUpdateWindowSize(width, height);
+    }
+
+    private void resetSentWindowSize() {
+        lastSentWindowWidth = -1;
+        lastSentWindowHeight = -1;
     }
 
     private void applyNativeSurfaceBufferSize(@NonNull SurfaceHolder holder, @NonNull RenderSize size) {
@@ -585,9 +647,10 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
             case MotionEvent.ACTION_MOVE:
             case MotionEvent.ACTION_HOVER_MOVE:
                 if (grabbed) {
-                    float relX = getRelativeAxis(event, MotionEvent.AXIS_RELATIVE_X, pointerIndex);
-                    float relY = getRelativeAxis(event, MotionEvent.AXIS_RELATIVE_Y, pointerIndex);
-                    if (relX == 0f && relY == 0f) {
+                    RelativeMouseDelta delta = collectRelativeMouseDelta(event, pointerIndex, false);
+                    float relX = delta.dx;
+                    float relY = delta.dy;
+                    if (!delta.hasMovement) {
                         if (!hasLastHardwareMousePosition || !isUsableHardwareAbsoluteCoordinate(event, x, y)) {
                             updateHardwareMousePositionIfUsable(event, x, y);
                             return true;
@@ -723,9 +786,10 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                 float x = safeEventX(event, pointerIndex);
                 float y = safeEventY(event, pointerIndex);
                 if (grabbed) {
-                    float relX = getRelativeAxis(event, MotionEvent.AXIS_RELATIVE_X, pointerIndex);
-                    float relY = getRelativeAxis(event, MotionEvent.AXIS_RELATIVE_Y, pointerIndex);
-                    if (relX == 0f && relY == 0f) {
+                    RelativeMouseDelta delta = collectRelativeMouseDelta(event, pointerIndex, false);
+                    float relX = delta.dx;
+                    float relY = delta.dy;
+                    if (!delta.hasMovement) {
                         if (!hasLastHardwareMousePosition || !isUsableHardwareAbsoluteCoordinate(event, x, y)) {
                             updateHardwareMousePositionIfUsable(event, x, y);
                             return true;
@@ -770,16 +834,15 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_MOVE:
             case MotionEvent.ACTION_HOVER_MOVE:
-                float relX = getRelativeAxis(event, MotionEvent.AXIS_RELATIVE_X, 0);
-                float relY = getRelativeAxis(event, MotionEvent.AXIS_RELATIVE_Y, 0);
-                if (relX == 0f && relY == 0f) {
+                RelativeMouseDelta delta = collectRelativeMouseDelta(event, 0, true);
+                if (!delta.hasMovement) {
                     // Under Android pointer capture, getX()/getY() can be a synthetic
                     // 0,0 position on some devices after touch input or dialogs. Treat
                     // that as "no movement" instead of warping the virtual cursor to a
                     // screen corner.
                     return true;
                 }
-                sendHardwareRelativeCursor(relX, relY);
+                sendHardwareRelativeCursor(delta.dx, delta.dy);
                 return true;
 
             case MotionEvent.ACTION_SCROLL:
@@ -828,12 +891,109 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         return -1;
     }
 
-    private static float getRelativeAxis(@NonNull MotionEvent event, int axis, int pointerIndex) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            float value = event.getAxisValue(axis, pointerIndex);
-            if (value != 0f) return value;
+    @NonNull
+    private static RelativeMouseDelta collectRelativeMouseDelta(
+            @NonNull MotionEvent event,
+            int pointerIndex,
+            boolean capturedPointerEvent
+    ) {
+        int safePointerIndex = safePointerIndex(event, pointerIndex);
+
+        // Many Android mouse paths report real relative movement through
+        // AXIS_RELATIVE_X/Y. Sum historical samples too; high-polling mice can
+        // batch several small deltas into one MotionEvent, and reading only the
+        // latest sample makes fast flicks feel slow or stuck.
+        float relX = sumRelativeAxis(event, MotionEvent.AXIS_RELATIVE_X, safePointerIndex);
+        float relY = sumRelativeAxis(event, MotionEvent.AXIS_RELATIVE_Y, safePointerIndex);
+        if (hasRelativeMovement(relX, relY)) {
+            return new RelativeMouseDelta(relX, relY, true);
         }
+
+        // Android pointer capture is inconsistent between devices. Some mice use
+        // AXIS_RELATIVE_X/Y, while others deliver the captured relative mouse
+        // movement through getX()/getY(). Use X/Y only for captured or explicitly
+        // relative mouse events, never for normal absolute menu hover events.
+        if (capturedPointerEvent || isRelativeMouseSource(event)) {
+            relX = sumCapturedPointerCoordinate(event, safePointerIndex, true);
+            relY = sumCapturedPointerCoordinate(event, safePointerIndex, false);
+            if (hasRelativeMovement(relX, relY)) {
+                return new RelativeMouseDelta(relX, relY, true);
+            }
+        }
+
+        return RelativeMouseDelta.NONE;
+    }
+
+    private static int safePointerIndex(@NonNull MotionEvent event, int pointerIndex) {
+        if (pointerIndex >= 0 && pointerIndex < event.getPointerCount()) return pointerIndex;
+        return 0;
+    }
+
+    private static float sumRelativeAxis(@NonNull MotionEvent event, int axis, int pointerIndex) {
+        float sum = 0f;
+        int safePointerIndex = safePointerIndex(event, pointerIndex);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            int historySize = event.getHistorySize();
+            for (int h = 0; h < historySize; h++) {
+                try {
+                    sum += event.getHistoricalAxisValue(axis, safePointerIndex, h);
+                } catch (Throwable ignored) {
+                    sum += event.getHistoricalAxisValue(axis, h);
+                }
+            }
+
+            try {
+                sum += event.getAxisValue(axis, safePointerIndex);
+            } catch (Throwable ignored) {
+                sum += event.getAxisValue(axis);
+            }
+            return sum;
+        }
+
         return event.getAxisValue(axis);
+    }
+
+    private static float sumCapturedPointerCoordinate(
+            @NonNull MotionEvent event,
+            int pointerIndex,
+            boolean xAxis
+    ) {
+        float sum = 0f;
+        int safePointerIndex = safePointerIndex(event, pointerIndex);
+        int historySize = event.getHistorySize();
+        for (int h = 0; h < historySize; h++) {
+            try {
+                sum += xAxis
+                        ? event.getHistoricalX(safePointerIndex, h)
+                        : event.getHistoricalY(safePointerIndex, h);
+            } catch (Throwable ignored) {
+                sum += xAxis ? event.getHistoricalX(h) : event.getHistoricalY(h);
+            }
+        }
+        return sum + (xAxis ? safeEventX(event, safePointerIndex) : safeEventY(event, safePointerIndex));
+    }
+
+    private static boolean isRelativeMouseSource(@NonNull MotionEvent event) {
+        return (event.getSource() & InputDevice.SOURCE_MOUSE_RELATIVE) == InputDevice.SOURCE_MOUSE_RELATIVE;
+    }
+
+    private static boolean hasRelativeMovement(float dx, float dy) {
+        return dx != 0f || dy != 0f;
+    }
+
+    private static final class RelativeMouseDelta {
+        static final RelativeMouseDelta NONE = new RelativeMouseDelta(0f, 0f, false);
+
+        final float dx;
+        final float dy;
+        final boolean hasMovement;
+
+        RelativeMouseDelta(float dx, float dy, boolean hasMovement) {
+            this.dx = dx;
+            this.dy = dy;
+            this.hasMovement = hasMovement;
+        }
     }
 
     private boolean isLikelyHotbarTap(float x, float y) {
@@ -1214,6 +1374,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         CallbackBridge.removeGrabListener(this);
         bridgeWindowAttached = false;
         JREUtils.releaseBridgeWindow();
+        resetSentWindowSize();
         releaseTextureSurface();
         super.onDetachedFromWindow();
     }

@@ -82,6 +82,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
     private static final String TAG = "TouchControlsOverlay";
     private static final int MAX_EDIT_HISTORY = 4;
+    private static final int KEY_SENDER_CLOSE = Integer.MIN_VALUE + 903;
 
     @NonNull private final ArrayDeque<String> undoHistory = new ArrayDeque<>();
     @NonNull private final ArrayDeque<String> redoHistory = new ArrayDeque<>();
@@ -142,6 +143,10 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     private static final int NO_POINTER_ID = -1;
     private static final int MOUSE_BUTTON_LEFT = 0;
     private static final int MOUSE_BUTTON_RIGHT = 1;
+
+    private boolean keySenderKeyboardVisible;
+    private int keySenderPointerId = NO_POINTER_ID;
+    @Nullable private View keySenderKeyboardView;
 
     private final Handler gestureHandler = new Handler(Looper.getMainLooper());
     private final int cameraTouchSlop;
@@ -269,6 +274,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
     public void setEditMode(boolean editMode) {
         this.editMode = editMode;
+        if (editMode) hideKeySenderKeyboard();
         rebuildWhenSized();
     }
 
@@ -304,6 +310,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
     public void saveLayout() {
         try {
+            normalizeUnstablePixelLayoutBeforeSave();
             File target = layoutFile != null ? layoutFile : TouchControlsStore.getSelectedLayoutFile(getContext());
             TouchControlsStore.saveLayout(target, layoutData);
             layoutFile = target;
@@ -449,6 +456,10 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             resolvedY = Math.max(0f, Math.min(Math.max(0, parentHeight - height), resolvedY));
             button.setX(resolvedX);
             button.setY(resolvedY);
+        }
+
+        if (keySenderKeyboardVisible && !editMode) {
+            attachKeySenderKeyboardView();
         }
     }
 
@@ -807,6 +818,10 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             return super.dispatchTouchEvent(event);
         }
 
+        if (dispatchKeySenderKeyboardTouch(event)) {
+            return true;
+        }
+
         if (isHardwarePointerEvent(event)) {
             return dispatchWholeTouchEventToPassthrough(event) || super.dispatchTouchEvent(event);
         }
@@ -867,6 +882,13 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
     @Override
     public boolean dispatchKeyEvent(@NonNull KeyEvent event) {
+        if (!editMode && keySenderKeyboardVisible && event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            if (event.getAction() == KeyEvent.ACTION_UP) {
+                hideKeySenderKeyboard();
+            }
+            return true;
+        }
+
         if (!editMode && MinecraftGLSurface.shouldRouteBackKeyToMinecraft(event)) {
             MinecraftGLSurface minecraftSurface = findMinecraftSurfaceTarget();
             if (minecraftSurface != null && minecraftSurface.handleKeyEventFromActivity(event)) {
@@ -931,6 +953,11 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     @Override
     public void onToggleControlsRequested() {
         toggleControlVisible();
+    }
+
+    @Override
+    public void onKeySenderKeyboardRequested() {
+        showKeySenderKeyboard();
     }
 
     @NonNull
@@ -1192,14 +1219,28 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             slotSpinner.setAdapter(slotAdapter);
             int slotValue = slot < startingKeySlots.length ? startingKeySlots[slot] : 0;
             slotSpinner.setSelection(TouchInputBinding.selectedKeyOptionIndex(slotValue), false);
-            slotRow.addView(slotSpinner, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.45f));
+            slotRow.addView(slotSpinner, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.15f));
+
+            Button pickSlot = new Button(context);
+            pickSlot.setText("Pick");
+            pickSlot.setAllCaps(false);
+            slotRow.addView(pickSlot, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.55f));
 
             Button clearSlot = new Button(context);
             clearSlot.setText("Clear");
             clearSlot.setAllCaps(false);
-            slotRow.addView(clearSlot, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.65f));
+            slotRow.addView(clearSlot, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.6f));
 
             final int slotIndex = slot;
+            pickSlot.setOnClickListener(v -> showKeyboardKeyPickerDialog(
+                    context,
+                    slotIndex,
+                    keySlotSpinners[slotIndex],
+                    keyCodes,
+                    boundKeys,
+                    keySlotSpinners,
+                    keyOptions
+            ));
             clearSlot.setOnClickListener(v -> {
                 keySlotSpinners[slotIndex].setSelection(TouchInputBinding.selectedKeyOptionIndex(0));
                 updateKeySlotSummary(keyCodes, boundKeys, keySlotSpinners, keyOptions);
@@ -1282,9 +1323,9 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         SeekBar sizeSlider = addSlider(layout, 250, initialPercent);
 
         addSectionHeader(layout, "Appearance", "Adjust opacity, rounded corners, and stroke width.");
-        EditText opacity = textField(context, "Opacity 0.15 - 1.0", String.valueOf(data.opacity), false);
+        EditText opacity = textField(context, "Opacity 0.0 - 1.0", String.valueOf(data.opacity), false);
         addFieldRow(layout, "Opacity", opacity);
-        SeekBar opacitySlider = addSlider(layout, 100, Math.round(clamp(data.opacity, 0.15f, 1f) * 100f));
+        SeekBar opacitySlider = addSlider(layout, 100, Math.round(clamp(data.opacity, 0f, 1f) * 100f));
 
         EditText cornerRadius = textField(context, "Corner radius", String.valueOf(Math.round(data.cornerRadius)), true);
         addFieldRow(layout, "Corner radius", cornerRadius);
@@ -1356,7 +1397,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             data.y = parseFloat(y, data.y);
             data.width = Math.max(24f, parseFloat(width, data.width));
             data.height = Math.max(24f, parseFloat(height, data.height));
-            data.opacity = Math.max(0.15f, Math.min(1f, parseFloat(opacity, data.opacity)));
+            data.opacity = clamp(parseFloat(opacity, data.opacity), 0f, 1f);
             data.cornerRadius = Math.max(0f, parseFloat(cornerRadius, data.cornerRadius));
             data.strokeWidth = Math.max(0f, parseFloat(strokeWidth, data.strokeWidth));
             data.strokeColor = parseColorValue(strokeColor.getText() == null ? "" : strokeColor.getText().toString(), data.strokeColor);
@@ -1377,7 +1418,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 setSliderProgress(ySlider, Math.round(parseFloat(y, data.y)));
                 setSliderProgress(widthSlider, Math.round(parseFloat(width, data.width)));
                 setSliderProgress(heightSlider, Math.round(parseFloat(height, data.height)));
-                setSliderProgress(opacitySlider, Math.round(Math.max(0.15f, Math.min(1f, parseFloat(opacity, data.opacity))) * 100f));
+                setSliderProgress(opacitySlider, Math.round(clamp(parseFloat(opacity, data.opacity), 0f, 1f) * 100f));
                 setSliderProgress(cornerSlider, Math.round(parseFloat(cornerRadius, data.cornerRadius)));
                 setSliderProgress(strokeSlider, Math.round(parseFloat(strokeWidth, data.strokeWidth)));
                 textChangingSlider[0] = false;
@@ -1400,7 +1441,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         addPreviewSliderListener(opacitySlider, dialogRef, () -> {
             if (!textChangingSlider[0]) {
                 sliderChangingText[0] = true;
-                opacity.setText(String.valueOf(Math.max(15, opacitySlider.getProgress()) / 100f));
+                opacity.setText(String.valueOf(opacitySlider.getProgress() / 100f));
                 sliderChangingText[0] = false;
                 applyPreview.run();
             }
@@ -1485,7 +1526,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 data.width = Math.max(24f, parseFloat(width, data.width));
                 data.height = Math.max(24f, parseFloat(height, data.height));
                 data.sizePercent = clamp(currentPercent[0], 30f, 250f);
-                data.opacity = Math.max(0.15f, Math.min(1f, parseFloat(opacity, data.opacity)));
+                data.opacity = clamp(parseFloat(opacity, data.opacity), 0f, 1f);
                 data.cornerRadius = Math.max(0f, parseFloat(cornerRadius, data.cornerRadius));
                 data.strokeWidth = Math.max(0f, parseFloat(strokeWidth, data.strokeWidth));
                 data.strokeColor = parseColorValue(strokeColor.getText() == null ? "" : strokeColor.getText().toString(), data.strokeColor);
@@ -1564,7 +1605,9 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                     realDisplay[1] / Math.max(1f, sourceHeight)
             );
 
-            float uniformScale = Math.max(parentScale, realScale);
+            boolean screenSizedCanvas = Math.abs(sourceWidth - safeParentWidth) <= Math.max(4f, safeParentWidth * 0.05f)
+                    && Math.abs(sourceHeight - safeParentHeight) <= Math.max(4f, safeParentHeight * 0.05f);
+            float uniformScale = screenSizedCanvas ? parentScale : Math.max(parentScale, realScale);
 
             // Legacy default_touch.json files from a 1920x1080 device normally land
             // as an 854x480-ish logical canvas. Ultrawide devices can report a shorter
@@ -1684,6 +1727,10 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             float rightThreshold = sourceWidth * 0.58f;
             float leftThreshold = sourceWidth * 0.42f;
 
+            if (isOutOfSourceBoundsX(control, sourceControlWidth)) {
+                return centerMappedScreenX(sourceCenterX, screenControlWidth);
+            }
+
             if (sourceCenterX >= rightThreshold) {
                 float sourceRightOffset = Math.max(0f, sourceWidth - control.x - sourceControlWidth);
                 return parentWidth - (sourceRightOffset * sizeScale) - screenControlWidth;
@@ -1693,8 +1740,21 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 return control.x * sizeScale;
             }
 
+            return centerMappedScreenX(sourceCenterX, screenControlWidth);
+        }
+
+        private boolean isOutOfSourceBoundsX(@NonNull TouchControlData control, float sourceControlWidth) {
+            return control.x < 0f || control.x + sourceControlWidth > sourceWidth;
+        }
+
+        private float centerMappedScreenX(float sourceCenterX, float screenControlWidth) {
             float sourceCenterOffset = sourceCenterX - (sourceWidth / 2f);
             return (parentWidth / 2f) + (sourceCenterOffset * sizeScale) - (screenControlWidth / 2f);
+        }
+
+        private float centerMappedSourceX(float screenX, float screenControlWidth, float sourceControlWidth) {
+            float screenCenter = screenX + (screenControlWidth / 2f);
+            return (sourceWidth / 2f) + ((screenCenter - (parentWidth / 2f)) / sizeScale) - (sourceControlWidth / 2f);
         }
 
         float toScreenY(@NonNull TouchControlData control, float screenControlHeight) {
@@ -1710,6 +1770,10 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             float rightThreshold = sourceWidth * 0.58f;
             float leftThreshold = sourceWidth * 0.42f;
 
+            if (isOutOfSourceBoundsX(control, sourceControlWidth)) {
+                return centerMappedSourceX(screenX, screenControlWidth, sourceControlWidth);
+            }
+
             if (sourceCenterX >= rightThreshold) {
                 float screenRightOffset = Math.max(0f, parentWidth - screenX - screenControlWidth);
                 return sourceWidth - (screenRightOffset / sizeScale) - sourceControlWidth;
@@ -1719,8 +1783,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 return screenX / sizeScale;
             }
 
-            float screenCenter = screenX + (screenControlWidth / 2f);
-            return (sourceWidth / 2f) + ((screenCenter - (parentWidth / 2f)) / sizeScale) - (sourceControlWidth / 2f);
+            return centerMappedSourceX(screenX, screenControlWidth, sourceControlWidth);
         }
 
         float fromScreenY(float screenY) {
@@ -1840,7 +1903,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         view.setX(clamp(metrics.toScreenX(data, width), 0f, Math.max(0f, getWidth() - width)));
         view.setY(clamp(metrics.toScreenY(data, height), 0f, Math.max(0f, getHeight() - height)));
         view.setText(data.label);
-        view.setAlpha(Math.max(0.15f, Math.min(1f, data.opacity)) * ControlsPreferences.getGlobalOpacity(getContext()));
+        view.setAlpha(clamp(data.opacity, 0f, 1f) * clamp(ControlsPreferences.getGlobalOpacity(getContext()), 0f, 1f));
         view.refreshVisualState();
         view.requestLayout();
         view.invalidate();
@@ -1860,6 +1923,332 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         return drawable;
     }
 
+
+
+    private interface KeyPickerSelection {
+        void onKeyPicked(int keyCode);
+    }
+
+    private interface KeySenderSelection {
+        void onKeyPicked(@NonNull KeySpec key, @NonNull Button button);
+    }
+
+    private static final class KeySpec {
+        final String label;
+        final int keyCode;
+        final float widthDp;
+
+        KeySpec(@NonNull String label, int keyCode, float widthDp) {
+            this.label = label;
+            this.keyCode = keyCode;
+            this.widthDp = widthDp;
+        }
+    }
+
+    private void showKeyboardKeyPickerDialog(
+            @NonNull Context context,
+            int slotIndex,
+            @Nullable Spinner slotSpinner,
+            @NonNull EditText hiddenKeySlots,
+            @NonNull TextView boundKeys,
+            @NonNull Spinner[] keySlotSpinners,
+            @NonNull TouchInputBinding.Option[] keyOptions
+    ) {
+        if (slotSpinner == null) return;
+
+        int rowHeightPx = keyboardPickerRowHeightPx(context, 7);
+        LinearLayout content = new LinearLayout(context);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(10f), dp(8f), dp(10f), dp(8f));
+        content.setBackground(makeKeyboardPickerBackground());
+
+        LinearLayout titleRow = new LinearLayout(context);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        titleRow.setPadding(0, 0, 0, dp(4f));
+
+        TextView title = new TextView(context);
+        title.setText("Pick key for Position " + slotIndex);
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(15f);
+        title.setSingleLine(true);
+        titleRow.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button cancel = new Button(context);
+        cancel.setText("Cancel");
+        cancel.setAllCaps(false);
+        cancel.setMinHeight(0);
+        cancel.setMinimumHeight(0);
+        cancel.setPadding(dp(8f), 0, dp(8f), 0);
+        titleRow.addView(cancel, new LinearLayout.LayoutParams(dp(92f), dp(34f)));
+        content.addView(titleRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView hint = valueLabel(context, "Tap a key. Extra launcher/mouse actions are below.");
+        hint.setTextSize(11f);
+        hint.setSingleLine(true);
+        hint.setPadding(0, 0, 0, dp(2f));
+        content.addView(hint, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        final AlertDialog[] dialogRef = new AlertDialog[1];
+        KeyPickerSelection selection = keyCode -> {
+            int selected = TouchInputBinding.selectedKeyOptionIndex(keyCode);
+            slotSpinner.setSelection(selected, false);
+            updateKeySlotSummary(hiddenKeySlots, boundKeys, keySlotSpinners, keyOptions);
+            if (dialogRef[0] != null) dialogRef[0].dismiss();
+        };
+
+        ScrollView keyboardScroll = new ScrollView(context);
+        keyboardScroll.setFillViewport(false);
+        keyboardScroll.setClipToPadding(false);
+        keyboardScroll.setPadding(0, 0, 0, dp(6f));
+
+        LinearLayout keyboardPage = new LinearLayout(context);
+        keyboardPage.setOrientation(LinearLayout.VERTICAL);
+        keyboardScroll.addView(keyboardPage, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        content.addView(keyboardScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+        ));
+
+        LinearLayout keyboardRows = keyboardPage;
+        LinearLayout actionsContent = keyboardPage;
+
+        addKeyboardPickerRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("Esc", 256, 1.2f),
+                new KeySpec("F1", 290, 1f), new KeySpec("F2", 291, 1f), new KeySpec("F3", 292, 1f), new KeySpec("F4", 293, 1f),
+                new KeySpec("F5", 294, 1f), new KeySpec("F6", 295, 1f), new KeySpec("F7", 296, 1f), new KeySpec("F8", 297, 1f),
+                new KeySpec("F9", 298, 1f), new KeySpec("F10", 299, 1.08f), new KeySpec("F11", 300, 1.08f), new KeySpec("F12", 301, 1.08f)
+        );
+        addKeyboardPickerRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("`", 96, 1f),
+                new KeySpec("1", 49, 1f), new KeySpec("2", 50, 1f), new KeySpec("3", 51, 1f), new KeySpec("4", 52, 1f), new KeySpec("5", 53, 1f),
+                new KeySpec("6", 54, 1f), new KeySpec("7", 55, 1f), new KeySpec("8", 56, 1f), new KeySpec("9", 57, 1f), new KeySpec("0", 48, 1f),
+                new KeySpec("-", 45, 1f), new KeySpec("=", 61, 1f), new KeySpec("Back", 259, 1.9f)
+        );
+        addKeyboardPickerRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("Tab", 258, 1.45f),
+                new KeySpec("Q", 81, 1f), new KeySpec("W", 87, 1f), new KeySpec("E", 69, 1f), new KeySpec("R", 82, 1f), new KeySpec("T", 84, 1f),
+                new KeySpec("Y", 89, 1f), new KeySpec("U", 85, 1f), new KeySpec("I", 73, 1f), new KeySpec("O", 79, 1f), new KeySpec("P", 80, 1f),
+                new KeySpec("[", 91, 1f), new KeySpec("]", 93, 1f), new KeySpec("\\", 92, 1.25f)
+        );
+        addKeyboardPickerRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("A", 65, 1f), new KeySpec("S", 83, 1f), new KeySpec("D", 68, 1f), new KeySpec("F", 70, 1f), new KeySpec("G", 71, 1f),
+                new KeySpec("H", 72, 1f), new KeySpec("J", 74, 1f), new KeySpec("K", 75, 1f), new KeySpec("L", 76, 1f),
+                new KeySpec(";", 59, 1f), new KeySpec("'", 39, 1f), new KeySpec("Enter", 257, 1.85f)
+        );
+        addKeyboardPickerRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("Shift", 340, 1.75f),
+                new KeySpec("Z", 90, 1f), new KeySpec("X", 88, 1f), new KeySpec("C", 67, 1f), new KeySpec("V", 86, 1f), new KeySpec("B", 66, 1f),
+                new KeySpec("N", 78, 1f), new KeySpec("M", 77, 1f), new KeySpec(",", 44, 1f), new KeySpec(".", 46, 1f), new KeySpec("/", 47, 1f),
+                new KeySpec("RShift", 344, 1.75f)
+        );
+        addKeyboardPickerRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("Ctrl", 341, 1.15f), new KeySpec("Alt", 342, 1.1f), new KeySpec("Space", 32, 5.4f),
+                new KeySpec("RAlt", 346, 1.15f), new KeySpec("RCtrl", 345, 1.25f), new KeySpec("Menu", 348, 1.25f)
+        );
+        addKeyboardPickerRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("Ins", 260, 1.15f), new KeySpec("Del", 261, 1.15f), new KeySpec("Home", 268, 1.2f), new KeySpec("End", 269, 1.1f),
+                new KeySpec("PgUp", 266, 1.2f), new KeySpec("PgDn", 267, 1.2f),
+                new KeySpec("←", 263, 0.9f), new KeySpec("↑", 265, 0.9f), new KeySpec("↓", 264, 0.9f), new KeySpec("→", 262, 0.9f)
+        );
+
+        addKeyboardPickerSection(actionsContent, "Extra actions");
+        addKeyboardPickerRow(actionsContent, rowHeightPx, selection,
+                new KeySpec("None", 0, 0.95f),
+                new KeySpec("Left click", TouchControlData.SPECIAL_MOUSE_LEFT, 1.35f),
+                new KeySpec("Right click", TouchControlData.SPECIAL_MOUSE_RIGHT, 1.42f),
+                new KeySpec("Middle click", TouchControlData.SPECIAL_MOUSE_MIDDLE, 1.55f),
+                new KeySpec("Wheel up", TouchControlData.SPECIAL_SCROLL_UP, 1.25f),
+                new KeySpec("Wheel down", TouchControlData.SPECIAL_SCROLL_DOWN, 1.35f)
+        );
+        addKeyboardPickerRow(actionsContent, rowHeightPx, selection,
+                new KeySpec("Android keyboard", TouchControlData.SPECIAL_KEYBOARD, 1.55f),
+                new KeySpec("Key sender", TouchControlData.SPECIAL_KEY_SENDER_KEYBOARD, 1.35f),
+                new KeySpec("Launcher menu", TouchControlData.SPECIAL_MENU, 1.55f),
+                new KeySpec("Hide controls", TouchControlData.SPECIAL_TOGGLE_CONTROLS, 1.45f),
+                new KeySpec("Virtual cursor", TouchControlData.SPECIAL_VIRTUAL_MOUSE, 1.5f)
+        );
+
+        AlertDialog dialog = new AlertDialog.Builder(context)
+                .setView(content)
+                .create();
+        dialogRef[0] = dialog;
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        dialog.setOnShowListener(shown -> styleKeyboardPickerWindow(dialog));
+        dialog.show();
+    }
+
+    private int keyboardPickerRowHeightPx(@NonNull Context context, int rowCount) {
+        float density = Math.max(0.1f, context.getResources().getDisplayMetrics().density);
+        // The keyboard page now scrolls vertically as one piece, so rows should not
+        // shrink to fit short displays. Keep a real keyboard-sized row and let the
+        // ScrollView expose the lower keys/actions on phones with less height.
+        return Math.round(46f * density);
+    }
+
+    private void styleKeyboardPickerWindow(@NonNull AlertDialog dialog) {
+        if (dialog.getWindow() == null) return;
+        dialog.getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+        dialog.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+        try {
+            View decor = dialog.getWindow().getDecorView();
+            decor.setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            );
+            View content = decor.findViewById(android.R.id.content);
+            if (content instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) content;
+                for (int i = 0; i < group.getChildCount(); i++) {
+                    View child = group.getChildAt(i);
+                    ViewGroup.LayoutParams params = child.getLayoutParams();
+                    if (params != null) {
+                        params.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                        params.height = ViewGroup.LayoutParams.MATCH_PARENT;
+                        child.setLayoutParams(params);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @NonNull
+    private GradientDrawable makeKeyboardPickerBackground() {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(0xF4202124);
+        drawable.setCornerRadius(0f);
+        return drawable;
+    }
+
+    private void addKeyboardPickerSection(@NonNull LinearLayout parent, @NonNull String title) {
+        TextView section = new TextView(getContext());
+        section.setText(title);
+        section.setTextColor(Color.WHITE);
+        section.setTextSize(12f);
+        section.setSingleLine(true);
+        section.setPadding(0, dp(4f), 0, dp(1f));
+        parent.addView(section, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+    }
+
+    private void addKeyboardPickerRow(
+            @NonNull LinearLayout parent,
+            int rowHeightPx,
+            @NonNull KeyPickerSelection selection,
+            @NonNull KeySpec... keys
+    ) {
+        LinearLayout row = new LinearLayout(getContext());
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setPadding(0, 0, 0, 0);
+        for (KeySpec key : keys) {
+            addKeyboardPickerKey(row, key, rowHeightPx, selection);
+        }
+        parent.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                rowHeightPx
+        ));
+    }
+
+    private void addKeyboardPickerKey(
+            @NonNull LinearLayout row,
+            @NonNull KeySpec key,
+            int rowHeightPx,
+            @NonNull KeyPickerSelection selection
+    ) {
+        Button button = new Button(getContext());
+        button.setText(key.label);
+        button.setTextSize(rowHeightPx <= dp(32f) ? 9.5f : rowHeightPx >= dp(46f) ? 12f : 10.5f);
+        button.setAllCaps(false);
+        button.setSingleLine(true);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setMinHeight(0);
+        button.setMinimumHeight(0);
+        button.setPadding(dp(2f), 0, dp(2f), 0);
+        button.setBackground(makeKeyboardKeyBackground());
+        button.setOnClickListener(v -> selection.onKeyPicked(key.keyCode));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, Math.max(0.1f, key.widthDp));
+        params.setMargins(dp(1.5f), dp(1.5f), dp(1.5f), dp(1.5f));
+        row.addView(button, params);
+    }
+
+    @NonNull
+    private GradientDrawable makeKeyboardKeyBackground() {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(0xEE303236);
+        drawable.setCornerRadius(dp(7f));
+        drawable.setStroke(Math.max(1, dp(1f)), 0x55FFFFFF);
+        return drawable;
+    }
+
+    @NonNull
+    private GradientDrawable makeKeyboardKeySelectedBackground() {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(0xEE5E7CE2);
+        drawable.setCornerRadius(dp(7f));
+        drawable.setStroke(Math.max(1, dp(2f)), 0xFFFFFFFF);
+        return drawable;
+    }
+
+    private void addKeySenderKeyboardRow(
+            @NonNull LinearLayout parent,
+            int rowHeightPx,
+            @NonNull KeySenderSelection selection,
+            @NonNull KeySpec... keys
+    ) {
+        LinearLayout row = new LinearLayout(getContext());
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setPadding(0, 0, 0, 0);
+        for (KeySpec key : keys) {
+            addKeySenderKeyboardKey(row, key, rowHeightPx, selection);
+        }
+        parent.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                rowHeightPx
+        ));
+    }
+
+    private void addKeySenderKeyboardKey(
+            @NonNull LinearLayout row,
+            @NonNull KeySpec key,
+            int rowHeightPx,
+            @NonNull KeySenderSelection selection
+    ) {
+        Button button = new Button(getContext());
+        button.setText(key.label);
+        button.setTextSize(rowHeightPx <= dp(32f) ? 9.5f : rowHeightPx >= dp(46f) ? 12f : 10.5f);
+        button.setAllCaps(false);
+        button.setSingleLine(true);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setMinHeight(0);
+        button.setMinimumHeight(0);
+        button.setPadding(dp(2f), 0, dp(2f), 0);
+        button.setBackground(makeKeyboardKeyBackground());
+        button.setOnClickListener(v -> selection.onKeyPicked(key, button));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, Math.max(0.1f, key.widthDp));
+        params.setMargins(dp(1.5f), dp(1.5f), dp(1.5f), dp(1.5f));
+        row.addView(button, params);
+    }
 
     @NonNull
     private int[] readKeySlotsFromSpinners(
@@ -1998,12 +2387,394 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         }
     }
 
+
+    private void normalizeUnstablePixelLayoutBeforeSave() {
+        if (!editMode || getWidth() <= 1 || getHeight() <= 1) return;
+        if (!layoutData.usesPixelCoordinates()) return;
+        if (!hasUnstablePixelCoordinates()) return;
+
+        int parentWidth = Math.max(1, getWidth());
+        int parentHeight = Math.max(1, getHeight());
+
+        for (int i = 0; i < getChildCount(); i++) {
+            View child = getChildAt(i);
+            if (!(child instanceof TouchControlButtonView)) continue;
+
+            TouchControlButtonView button = (TouchControlButtonView) child;
+            TouchControlData data = button.getData();
+            int width = Math.max(1, button.getWidth());
+            int height = Math.max(1, button.getHeight());
+
+            data.x = clamp(button.getX(), 0f, Math.max(0f, parentWidth - width));
+            data.y = clamp(button.getY(), 0f, Math.max(0f, parentHeight - height));
+            data.width = width;
+            data.height = height;
+            data.rawX = null;
+            data.rawY = null;
+        }
+
+        layoutData.coordinateUnit = TouchControlsLayoutData.UNIT_PX;
+        layoutData.sourceWidth = parentWidth;
+        layoutData.sourceHeight = parentHeight;
+        layoutData.version = Math.max(layoutData.version, 4);
+    }
+
+    private boolean hasUnstablePixelCoordinates() {
+        float sourceWidth = layoutData.resolvedSourceWidth(getWidth());
+        float sourceHeight = layoutData.resolvedSourceHeight(getHeight());
+
+        for (TouchControlData control : layoutData.controls) {
+            if (control.rawX != null || control.rawY != null) return true;
+            float width = Math.max(1f, control.width);
+            float height = Math.max(1f, control.height);
+            if (control.x < 0f || control.y < 0f) return true;
+            if (control.x + width > sourceWidth || control.y + height > sourceHeight) return true;
+        }
+
+        return false;
+    }
+
     private static float maxCursorCoordinate(float size) {
         return Math.max(0f, size - 1f);
     }
 
     private static float clamp(float value, float min, float max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+
+    private boolean dispatchKeySenderKeyboardTouch(@NonNull MotionEvent event) {
+        if (!keySenderKeyboardVisible || keySenderKeyboardView == null || keySenderKeyboardView.getVisibility() != VISIBLE) {
+            return false;
+        }
+
+        // While the key-sender keyboard is open, it owns the whole touch stream.
+        // This prevents a keyboard tap from also becoming camera movement or a hotbar tap.
+        try {
+            super.dispatchTouchEvent(event);
+        } catch (Throwable throwable) {
+            Logging.e(TAG, "Unable to dispatch key sender keyboard touch", throwable);
+        }
+        return true;
+    }
+
+    private void showKeySenderKeyboard() {
+        if (editMode) return;
+        keySenderKeyboardVisible = true;
+        attachKeySenderKeyboardView();
+    }
+
+    private void hideKeySenderKeyboard() {
+        keySenderKeyboardVisible = false;
+        keySenderPointerId = NO_POINTER_ID;
+        View view = keySenderKeyboardView;
+        keySenderKeyboardView = null;
+        if (view != null && view.getParent() == this) {
+            removeView(view);
+        }
+    }
+
+    private void attachKeySenderKeyboardView() {
+        if (!keySenderKeyboardVisible || editMode) return;
+
+        if (keySenderKeyboardView != null && keySenderKeyboardView.getParent() == this) {
+            keySenderKeyboardView.bringToFront();
+            return;
+        }
+
+        View keyboard = createKeySenderKeyboardView();
+        keySenderKeyboardView = keyboard;
+        addView(keyboard, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        keyboard.bringToFront();
+    }
+
+    @NonNull
+    private View createKeySenderKeyboardView() {
+        FrameLayout root = new FrameLayout(getContext());
+        root.setClickable(true);
+        root.setFocusable(true);
+        root.setBackgroundColor(0xCC000000);
+
+        LinearLayout content = new LinearLayout(getContext());
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(10f), dp(8f), dp(10f), dp(8f));
+        content.setBackground(makeKeyboardPickerBackground());
+        root.addView(content, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+
+        LinearLayout titleRow = new LinearLayout(getContext());
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        titleRow.setPadding(0, 0, 0, dp(4f));
+
+        TextView title = new TextView(getContext());
+        title.setText("DroidBridge key keyboard");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(15f);
+        title.setSingleLine(true);
+        titleRow.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button send = new Button(getContext());
+        send.setText("Send Key");
+        send.setAllCaps(false);
+        send.setMinHeight(0);
+        send.setMinimumHeight(0);
+        send.setPadding(dp(8f), 0, dp(8f), 0);
+        titleRow.addView(send, new LinearLayout.LayoutParams(dp(112f), dp(34f)));
+
+        Button clear = new Button(getContext());
+        clear.setText("Clear");
+        clear.setAllCaps(false);
+        clear.setMinHeight(0);
+        clear.setMinimumHeight(0);
+        clear.setPadding(dp(8f), 0, dp(8f), 0);
+        titleRow.addView(clear, new LinearLayout.LayoutParams(dp(86f), dp(34f)));
+
+        Button close = new Button(getContext());
+        close.setText("Close");
+        close.setAllCaps(false);
+        close.setMinHeight(0);
+        close.setMinimumHeight(0);
+        close.setPadding(dp(8f), 0, dp(8f), 0);
+        close.setOnClickListener(v -> hideKeySenderKeyboard());
+        titleRow.addView(close, new LinearLayout.LayoutParams(dp(86f), dp(34f)));
+        content.addView(titleRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView hint = valueLabel(getContext(), "Tap keys to queue them. Press Send Key to send the highlighted keys to Minecraft.");
+        hint.setTextSize(11f);
+        hint.setSingleLine(false);
+        hint.setPadding(0, 0, 0, dp(2f));
+        content.addView(hint, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView queuedLabel = valueLabel(getContext(), "Queued: none");
+        queuedLabel.setTextSize(12f);
+        queuedLabel.setSingleLine(false);
+        queuedLabel.setPadding(0, 0, 0, dp(4f));
+        content.addView(queuedLabel, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        int rowHeightPx = keyboardPickerRowHeightPx(getContext(), 7);
+        java.util.ArrayList<Integer> pendingKeys = new java.util.ArrayList<>();
+        java.util.ArrayList<Button> highlightedButtons = new java.util.ArrayList<>();
+        KeySenderSelection selection = (key, button) -> queueKeySenderKeyboardSelection(key, button, pendingKeys, highlightedButtons, queuedLabel);
+
+        clear.setOnClickListener(v -> clearQueuedKeySenderKeys(pendingKeys, highlightedButtons, queuedLabel));
+        send.setOnClickListener(v -> sendQueuedKeySenderKeys(pendingKeys));
+
+        ScrollView keyboardScroll = new ScrollView(getContext());
+        keyboardScroll.setFillViewport(false);
+        keyboardScroll.setClipToPadding(false);
+        keyboardScroll.setPadding(0, 0, 0, dp(6f));
+
+        LinearLayout keyboardPage = new LinearLayout(getContext());
+        keyboardPage.setOrientation(LinearLayout.VERTICAL);
+        keyboardScroll.addView(keyboardPage, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        content.addView(keyboardScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+        ));
+
+        LinearLayout keyboardRows = keyboardPage;
+        LinearLayout actionsContent = keyboardPage;
+
+        addKeySenderKeyboardRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("Esc", 256, 1.2f),
+                new KeySpec("F1", 290, 1f), new KeySpec("F2", 291, 1f), new KeySpec("F3", 292, 1f), new KeySpec("F4", 293, 1f),
+                new KeySpec("F5", 294, 1f), new KeySpec("F6", 295, 1f), new KeySpec("F7", 296, 1f), new KeySpec("F8", 297, 1f),
+                new KeySpec("F9", 298, 1f), new KeySpec("F10", 299, 1.08f), new KeySpec("F11", 300, 1.08f), new KeySpec("F12", 301, 1.08f)
+        );
+        addKeySenderKeyboardRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("`", 96, 1f),
+                new KeySpec("1", 49, 1f), new KeySpec("2", 50, 1f), new KeySpec("3", 51, 1f), new KeySpec("4", 52, 1f), new KeySpec("5", 53, 1f),
+                new KeySpec("6", 54, 1f), new KeySpec("7", 55, 1f), new KeySpec("8", 56, 1f), new KeySpec("9", 57, 1f), new KeySpec("0", 48, 1f),
+                new KeySpec("-", 45, 1f), new KeySpec("=", 61, 1f), new KeySpec("Back", 259, 1.9f)
+        );
+        addKeySenderKeyboardRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("Tab", 258, 1.45f),
+                new KeySpec("Q", 81, 1f), new KeySpec("W", 87, 1f), new KeySpec("E", 69, 1f), new KeySpec("R", 82, 1f), new KeySpec("T", 84, 1f),
+                new KeySpec("Y", 89, 1f), new KeySpec("U", 85, 1f), new KeySpec("I", 73, 1f), new KeySpec("O", 79, 1f), new KeySpec("P", 80, 1f),
+                new KeySpec("[", 91, 1f), new KeySpec("]", 93, 1f), new KeySpec("\\", 92, 1.25f)
+        );
+        addKeySenderKeyboardRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("A", 65, 1f), new KeySpec("S", 83, 1f), new KeySpec("D", 68, 1f), new KeySpec("F", 70, 1f), new KeySpec("G", 71, 1f),
+                new KeySpec("H", 72, 1f), new KeySpec("J", 74, 1f), new KeySpec("K", 75, 1f), new KeySpec("L", 76, 1f),
+                new KeySpec(";", 59, 1f), new KeySpec("'", 39, 1f), new KeySpec("Enter", 257, 1.85f)
+        );
+        addKeySenderKeyboardRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("Shift", 340, 1.75f),
+                new KeySpec("Z", 90, 1f), new KeySpec("X", 88, 1f), new KeySpec("C", 67, 1f), new KeySpec("V", 86, 1f), new KeySpec("B", 66, 1f),
+                new KeySpec("N", 78, 1f), new KeySpec("M", 77, 1f), new KeySpec(",", 44, 1f), new KeySpec(".", 46, 1f), new KeySpec("/", 47, 1f),
+                new KeySpec("RShift", 344, 1.75f)
+        );
+        addKeySenderKeyboardRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("Ctrl", 341, 1.15f), new KeySpec("Alt", 342, 1.1f), new KeySpec("Space", 32, 5.4f),
+                new KeySpec("RAlt", 346, 1.15f), new KeySpec("RCtrl", 345, 1.25f), new KeySpec("Menu", 348, 1.25f)
+        );
+        addKeySenderKeyboardRow(keyboardRows, rowHeightPx, selection,
+                new KeySpec("Ins", 260, 1.15f), new KeySpec("Del", 261, 1.15f), new KeySpec("Home", 268, 1.2f), new KeySpec("End", 269, 1.1f),
+                new KeySpec("PgUp", 266, 1.2f), new KeySpec("PgDn", 267, 1.2f),
+                new KeySpec("←", 263, 0.9f), new KeySpec("↑", 265, 0.9f), new KeySpec("↓", 264, 0.9f), new KeySpec("→", 262, 0.9f)
+        );
+
+        addKeyboardPickerSection(actionsContent, "Actions");
+        addKeySenderKeyboardRow(actionsContent, rowHeightPx, selection,
+                new KeySpec("Close", KEY_SENDER_CLOSE, 1.0f),
+                new KeySpec("Left click", TouchControlData.SPECIAL_MOUSE_LEFT, 1.35f),
+                new KeySpec("Right click", TouchControlData.SPECIAL_MOUSE_RIGHT, 1.42f),
+                new KeySpec("Middle click", TouchControlData.SPECIAL_MOUSE_MIDDLE, 1.55f),
+                new KeySpec("Wheel up", TouchControlData.SPECIAL_SCROLL_UP, 1.25f),
+                new KeySpec("Wheel down", TouchControlData.SPECIAL_SCROLL_DOWN, 1.35f),
+                new KeySpec("Android keyboard", TouchControlData.SPECIAL_KEYBOARD, 1.65f),
+                new KeySpec("Launcher menu", TouchControlData.SPECIAL_MENU, 1.55f)
+        );
+
+        return root;
+    }
+
+    private void queueKeySenderKeyboardSelection(
+            @NonNull KeySpec key,
+            @NonNull Button button,
+            @NonNull java.util.ArrayList<Integer> pendingKeys,
+            @NonNull java.util.ArrayList<Button> highlightedButtons,
+            @NonNull TextView queuedLabel
+    ) {
+        if (key.keyCode == KEY_SENDER_CLOSE) {
+            hideKeySenderKeyboard();
+            return;
+        }
+        if (key.keyCode == TouchControlData.SPECIAL_KEY_SENDER_KEYBOARD) {
+            return;
+        }
+
+        pendingKeys.add(key.keyCode);
+        if (!highlightedButtons.contains(button)) {
+            highlightedButtons.add(button);
+            button.setBackground(makeKeyboardKeySelectedBackground());
+        }
+        updateQueuedKeySenderLabel(pendingKeys, queuedLabel);
+    }
+
+    private void clearQueuedKeySenderKeys(
+            @NonNull java.util.ArrayList<Integer> pendingKeys,
+            @NonNull java.util.ArrayList<Button> highlightedButtons,
+            @NonNull TextView queuedLabel
+    ) {
+        pendingKeys.clear();
+        for (Button button : highlightedButtons) {
+            if (button != null) {
+                button.setBackground(makeKeyboardKeyBackground());
+            }
+        }
+        highlightedButtons.clear();
+        updateQueuedKeySenderLabel(pendingKeys, queuedLabel);
+    }
+
+    private void updateQueuedKeySenderLabel(
+            @NonNull java.util.ArrayList<Integer> pendingKeys,
+            @NonNull TextView queuedLabel
+    ) {
+        if (pendingKeys.isEmpty()) {
+            queuedLabel.setText("Queued: none");
+            return;
+        }
+
+        StringBuilder builder = new StringBuilder("Queued: ");
+        for (int i = 0; i < pendingKeys.size(); i++) {
+            if (i > 0) builder.append("  •  ");
+            builder.append(TouchInputBinding.labelForKeyCode(pendingKeys.get(i)));
+        }
+        queuedLabel.setText(builder.toString());
+    }
+
+    private void sendQueuedKeySenderKeys(@NonNull java.util.ArrayList<Integer> pendingKeys) {
+        if (pendingKeys.isEmpty()) {
+            Toast.makeText(getContext(), "Pick at least one key first.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        try {
+            for (int keyCode : new java.util.ArrayList<>(pendingKeys)) {
+                sendKeySenderInput(keyCode);
+            }
+        } finally {
+            hideKeySenderKeyboard();
+        }
+    }
+
+    private void sendKeySenderInput(int keyCode) {
+        try {
+            switch (keyCode) {
+                case TouchControlData.SPECIAL_MOUSE_LEFT:
+                    sendLeftMouse(true);
+                    sendLeftMouse(false);
+                    return;
+                case TouchControlData.SPECIAL_MOUSE_RIGHT:
+                    sendRightMouse(true);
+                    sendRightMouse(false);
+                    return;
+                case TouchControlData.SPECIAL_MOUSE_MIDDLE:
+                    sendMouseButton(2, true, "Unable to send middle mouse from key keyboard");
+                    sendMouseButton(2, false, "Unable to send middle mouse from key keyboard");
+                    return;
+                case TouchControlData.SPECIAL_SCROLL_UP:
+                    sendScrollFromKeySender(1d);
+                    return;
+                case TouchControlData.SPECIAL_SCROLL_DOWN:
+                    sendScrollFromKeySender(-1d);
+                    return;
+                case TouchControlData.SPECIAL_KEYBOARD:
+                    TouchKeyboardHelper.showKeyboard(this);
+                    return;
+                case TouchControlData.SPECIAL_MENU:
+                    onMenuRequested();
+                    return;
+                case TouchControlData.SPECIAL_TOGGLE_CONTROLS:
+                    toggleControlVisible();
+                    return;
+                case TouchControlData.SPECIAL_VIRTUAL_MOUSE:
+                    toggleVirtualMouseFromKeySender();
+                    return;
+                case TouchControlData.SPECIAL_KEY_SENDER_KEYBOARD:
+                    return;
+                default:
+                    if (keyCode > 0) sendKeyTap(keyCode);
+            }
+        } catch (Throwable throwable) {
+            Logging.e(TAG, "Unable to send queued key keyboard input", throwable);
+        }
+    }
+
+    private void sendScrollFromKeySender(double amount) {
+        try {
+            CallbackBridge.setInputReady(true);
+            CallbackBridge.sendScroll(0d, amount);
+        } catch (Throwable throwable) {
+            Logging.e(TAG, "Unable to send scroll from key keyboard", throwable);
+        }
+    }
+
+    private void toggleVirtualMouseFromKeySender() {
+        boolean enabled = !ControlsPreferences.isVirtualMouseEnabled(getContext());
+        ControlsPreferences.setVirtualMouseEnabled(getContext(), enabled);
+        Toast.makeText(getContext(), enabled ? "Virtual cursor shown" : "Virtual cursor hidden", Toast.LENGTH_SHORT).show();
+        postInvalidateOnAnimation();
     }
 
     private boolean routePointerDown(@NonNull MotionEvent event, int pointerIndex) {
@@ -2511,12 +3282,15 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     private void sendKeyTap(int keyCode) {
         try {
             CallbackBridge.setInputReady(true);
+            if (keyCode == 84 || keyCode == 47) {
+                TouchKeyboardHelper.markChatKeyPressed();
+            }
             CallbackBridge.sendKeyPress(keyCode, CallbackBridge.getCurrentMods(), true);
             CallbackBridge.setModifiers(keyCode, true);
             CallbackBridge.sendKeyPress(keyCode, CallbackBridge.getCurrentMods(), false);
             CallbackBridge.setModifiers(keyCode, false);
         } catch (Throwable throwable) {
-            Logging.e(TAG, "Unable to send hotbar key tap", throwable);
+            Logging.e(TAG, "Unable to send key tap", throwable);
         }
     }
 
@@ -2938,6 +3712,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
     @Override
     protected void onDetachedFromWindow() {
+        hideKeySenderKeyboard();
         clearRuntimeTouchRouting();
         applyAndroidPointerIconPolicy(false, true);
         super.onDetachedFromWindow();

@@ -96,11 +96,11 @@ public final class ControlsPreferences {
     }
 
     public static float getGlobalOpacity(@NonNull Context context) {
-        return clamp(prefs(context).getFloat(KEY_OPACITY, 1f), 0.15f, 1f);
+        return clamp(prefs(context).getFloat(KEY_OPACITY, 1f), 0f, 1f);
     }
 
     public static void setGlobalOpacity(@NonNull Context context, float value) {
-        prefs(context).edit().putFloat(KEY_OPACITY, clamp(value, 0.15f, 1f)).apply();
+        prefs(context).edit().putFloat(KEY_OPACITY, clamp(value, 0f, 1f)).apply();
     }
 
     public static boolean isEditGridEnabled(@NonNull Context context) {

@@ -32,6 +32,7 @@ public final class TouchControlData {
     public static final int SPECIAL_SCROLL_UP = -7;
     public static final int SPECIAL_SCROLL_DOWN = -8;
     public static final int SPECIAL_MENU = -9;
+    public static final int SPECIAL_KEY_SENDER_KEYBOARD = -10;
     public static final int MAX_ACTION_SLOTS = 4;
 
     @NonNull public String id = UUID.randomUUID().toString();
@@ -446,6 +447,9 @@ public final class TouchControlData {
                 return;
             case SPECIAL_KEYBOARD:
                 data.action = TouchControlActions.KEYBOARD;
+                return;
+            case SPECIAL_KEY_SENDER_KEYBOARD:
+                data.action = TouchControlActions.KEY_SENDER_KEYBOARD;
                 return;
             case SPECIAL_VIRTUAL_MOUSE:
                 data.action = TouchControlActions.VIRTUAL_MOUSE;

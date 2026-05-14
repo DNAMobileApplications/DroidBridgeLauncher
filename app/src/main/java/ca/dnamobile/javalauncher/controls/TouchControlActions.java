@@ -20,6 +20,7 @@ public final class TouchControlActions {
     public static final String MENU = "menu";
     public static final String TOGGLE_CONTROLS = "toggle_controls";
     public static final String KEYBOARD = "keyboard";
+    public static final String KEY_SENDER_KEYBOARD = "key_sender_keyboard";
     public static final String JOYSTICK = "joystick";
     public static final String VIRTUAL_MOUSE = "virtual_mouse";
 
